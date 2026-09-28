@@ -1,7 +1,13 @@
 # ============================================================
-# Phoenix Guardian v7.7 — نگهبان فونیکس
+# Phoenix Guardian v7.7.2 — نگهبان فونیکس (زنجیرهٔ خودپرور)
 # نگهبان ۲۴/۷ پلتفرم z.ai روی زیرساخت رایگان GitHub Actions
 # (این فایل یگانه است — فقط همین را در ریپازیتوری خود کپی کنید)
+#
+# v7.7.2 — «زنجیرهٔ خودپرور» (self-chaining):
+#   زمان‌بند cron گیت‌هاب برای ورک‌فلوی تازه تا ۷۷+ دقیقه شلیک نشد؛
+#   حالا هر اجرا در پایان چرخه، اجرای بعدی را خودش dispatch می‌کند
+#   (GITHUB_TOKEN + actions:write) → کadenس ۵ دقیقه‌ای تضمینی و
+#   مستقل از scheduler. cron */5 به‌عنوان بذر پشتیبان باقی است.
 #
 # راه‌اندازی: Secretها را بسازید (Settings → Secrets and variables → Actions):
 #   PLATFORM_URL  = https://j1std7368na1-d.space-z.ai
@@ -15,16 +21,21 @@ name: Phoenix Guardian
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # هر ۵ دقیقه (درصورت تأخیر GitHub، تا ~۱۵ دقیقه)
+    - cron: "*/5 * * * *"   # بذر پشتیبان — زنجیرهٔ اصلی خودپرور است
   workflow_dispatch:        # اجرای دستی از تب Actions
     inputs:
       notify_test:
         description: "ارسال پیام آزمایشی تلگرام"
         type: boolean
         default: false
+      chained:
+        description: "(داخلی) حلقهٔ زنجیره — تا مرز ۵ دقیقهٔ بعد صبر می‌کند"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write            # برای commit کردن guardian-state.json
+  contents: write            # commit کردن guardian-state.json
+  actions: write             # dispatch زنجیرهٔ چرخهٔ بعد
 
 concurrency:
   group: phoenix-guardian
@@ -33,10 +44,23 @@ concurrency:
 jobs:
   guard:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Align to 5-min boundary
+        env:
+          CHAINED: ${{ github.event.inputs.chained }}
+        run: |
+          if [ "${CHAINED}" != "true" ]; then
+            echo "manual/seed run — executing immediately"
+            exit 0
+          fi
+          now=$(date +%s)
+          next=$(( (now / 300 + 1) * 300 + 20 ))
+          echo "chain: sleeping $(( next - now ))s to align with next 5-min boundary"
+          sleep $(( next - now ))
 
       - name: Phoenix guard cycle
         env:
@@ -332,3 +356,21 @@ jobs:
               log "FATAL: state file invalid after cycle"
               exit 1
             fi
+
+      - name: Chain next cycle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body='{"ref":"main","inputs":{"chained":"true"}}'
+          for i in 1 2 3; do
+            if printf '%s' "$body" | gh api --method POST \
+                 "/repos/${GITHUB_REPOSITORY}/actions/workflows/phoenix-guardian.yml/dispatches" \
+                 --input - >/dev/null 2>&1; then
+              echo "[chain] next cycle dispatched (attempt $i OK)"
+              exit 0
+            fi
+            echo "[chain] dispatch attempt $i failed — retrying in 10s"
+            sleep 10
+          done
+          echo "[chain] WARN: could not dispatch next cycle — scheduled cron will re-seed"
+          exit 0
