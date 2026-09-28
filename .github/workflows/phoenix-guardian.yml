@@ -49,8 +49,13 @@ jobs:
         run: |
             #!/usr/bin/env bash
             # ============================================================
-            # Phoenix Guardian — نگهبان فونیکس (v7.7)
+            # Phoenix Guardian — نگهبان فونیکس (v7.7.1)
             # نگهبان بیرونیِ همیشه‌روشن برای پلتفرم z.ai
+            #
+            # v7.7.1 — رفع باگ bash -e:
+            #   GitHub Actions مراحل run را با «bash -e» اجرا می‌کند؛ در نسخهٔ قبل
+            #   «try_wake; wake_rc=$?» با برگشت کد ۲ (تنظیم‌نبودن ZAI_TOKEN) کل اسکریپت را
+            #   قبل از هشدار تلگرام و ذخیرهٔ state می‌کشت. اکنون با «||» ایمن شده است.
             #
             # منطق (هر ۵ دقیقه با GitHub Actions):
             #   ۱) سلامت پلتفرم را چک می‌کند (GET /api/cron?src=github — پینگ ثبت + ترمیم موتور)
@@ -223,7 +228,8 @@ jobs:
                 add_event "down_started" "{}"
               fi
             
-              try_wake; wake_rc=$?
+              wake_rc=0
+              try_wake || wake_rc=$?   # bash -e safety: خروج غیرصفر نگهبان را نکش؛ ادامه بده تا هشدار/ذخیره انجام شود
             
               if [ "${wake_rc}" = "0" ]; then
                 wait_sec="${WAKE_WAIT_SEC}"
