@@ -1,0 +1,13 @@
+name: Cron Probe
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - run: echo "cron probe alive at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
