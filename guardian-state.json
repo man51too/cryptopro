@@ -1,8 +1,8 @@
 {
-  "state": "up",
-  "since": "2026-09-29T02:45:20Z",
-  "lastCheck": "2026-09-29T05:00:20Z",
-  "lastAlertAt": null,
+  "state": "down",
+  "since": "2026-09-29T05:05:20Z",
+  "lastCheck": "2026-09-29T05:05:20Z",
+  "lastAlertAt": "2026-09-29T05:05:20Z",
   "lastWake401AlertAt": null,
   "events": [
     {
@@ -49,6 +49,10 @@
       "type": "recovered",
       "at": "2026-09-29T02:45:20Z",
       "downMin": 390
+    },
+    {
+      "type": "down_started",
+      "at": "2026-09-29T05:05:20Z"
     }
   ]
 }
