@@ -1,8 +1,8 @@
 {
   "state": "down",
   "since": "2026-10-07T06:00:21Z",
-  "lastCheck": "2026-10-07T10:35:21Z",
-  "lastAlertAt": "2026-10-07T10:10:20Z",
+  "lastCheck": "2026-10-07T10:40:21Z",
+  "lastAlertAt": "2026-10-07T10:40:21Z",
   "lastWake401AlertAt": null,
   "events": [
     {
