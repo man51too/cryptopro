@@ -1,7 +1,14 @@
 # ============================================================
-# Phoenix Guardian v7.7.2 — نگهبان فونیکس (زنجیرهٔ خودپرور)
+# Phoenix Guardian v7.8 — نگهبان فونیکس (نردبان استقرار)
 # نگهبان ۲۴/۷ پلتفرم z.ai روی زیرساخت رایگان GitHub Actions
 # (این فایل یگانه است — فقط همین را در ریپازیتوری خود کپی کنید)
+#
+# v7.8 — «نردبان استقرار» (deploy rung):
+#   کشف بحرانی: وقتی workspace z.ai آزاد شود، API ری‌استارت ۴۰۴ می‌دهد
+#   و پلتفرم تا مداخلهٔ دستی ۵۰۲ می‌ماند (چندین بار واقع شد!).
+#   اکنون مرحلهٔ سوم به نردبان بیدارسازی اضافه شد:
+#   POST /workspaces/deploy فقط با {chatId, deploymentId} — استقرار جدید
+#   همان دامنه را زنده می‌کند → احیای کامل خودکار بدون دخالت انسان.
 #
 # v7.7.2 — «زنجیرهٔ خودپرور» (self-chaining):
 #   زمان‌بند cron گیت‌هاب برای ورک‌فلوی تازه تا ۷۷+ دقیقه شلیک نشد؛
@@ -106,8 +113,10 @@ jobs:
             
             STATE_FILE="guardian-state.json"
             WAKE_URL="${WAKE_URL:-https://chat.z.ai/api/v1/web-dev/workspaces/restart}"
+            DEPLOY_URL="${DEPLOY_URL:-https://chat.z.ai/api/v1/web-dev/workspaces/deploy}"
             REPEAT_ALERT_SEC="${REPEAT_ALERT_SEC:-1800}"   # تکرار هشدار قطعی: هر ۳۰ دقیقه
             WAKE_WAIT_SEC="${WAKE_WAIT_SEC:-90}"        # مهلت بوت شدن موتور پس از بیدارسازی
+            DEPLOY_WAIT_SEC="${DEPLOY_WAIT_SEC:-120}"     # v7.8 — مهلت استقرار کامل پس از deploy
             EVENTS_MAX="${EVENTS_MAX:-30}"
             # ---- v7.7 ----
             HEALTH_PATH="${HEALTH_PATH:-/api/cron?src=github}"   # اندپوینت ثبت-کنندهٔ پینگ (به‌جای /api/health)
@@ -168,7 +177,7 @@ jobs:
               done
             }
             
-            # ---------- بیدارسازی: نردبان دو مرحله‌ای ----------
+            # ---------- بیدارسازی: نردبان سه مرحله‌ای (v7.8) ----------
             WAKE_METHOD="none"
             try_wake() {
               # مرحلهٔ ۱ — پینگ‌های پیاپی: هر GET خودش درخواست بیدارکننده است
@@ -178,21 +187,43 @@ jobs:
                 log "woke via GET burst"
                 return 0
               fi
-              # مرحلهٔ ۲ — API رسمی ری‌استارت z.ai
+              # مرحلهٔ ۲ — API رسمی ری‌استارت z.ai (workspace خفته اما زنده)
+              if [ -n "${ZAI_TOKEN}" ] && [ -n "${ZAI_CHAT_ID}" ]; then
+                local code body
+                code=$(curl -sS -m 30 -o /tmp/phoenix_wake.json -w '%{http_code}' \
+                  -X POST "${WAKE_URL}" \
+                  -H "Content-Type: application/json" \
+                  -H "Authorization: Bearer ${ZAI_TOKEN}" \
+                  -d "$(jq -n --arg c "${ZAI_CHAT_ID}" '{chatId:$c}')" 2>/dev/null || echo 000)
+                body=$(head -c 300 /tmp/phoenix_wake.json 2>/dev/null || true)
+                log "restart http=${code} body=${body}"
+                if [ "${code}" = "200" ]; then WAKE_METHOD="zai-restart"; return 0; fi
+                if [ "${code}" = "401" ]; then return 3; fi   # توکن منقضی
+                # 404 = workspace آزاد شده ← مرحلهٔ ۳
+              fi
+              # مرحلهٔ ۳ — v7.8: استقرار مجدد (workspace آزادشده؛ restart جواب نمی‌دهد)
+              # فقط chatId + deploymentId لازم است؛ deploymentId = ساب‌دامین PLATFORM_URL
+              if [ -n "${ZAI_TOKEN}" ] && [ -n "${ZAI_CHAT_ID}" ] && [ -n "${PLATFORM_URL}" ]; then
+                local dcode dbody dep_id
+                dep_id=$(printf '%s' "${PLATFORM_URL}" | sed -E 's|https?://([^.]+)\.space-z\.ai.*|\1|')
+                log "deploy rung: deploymentId=${dep_id}"
+                dcode=$(curl -sS -m 60 -o /tmp/phoenix_deploy.json -w '%{http_code}' \
+                  -X POST "${DEPLOY_URL}" \
+                  -H "Content-Type: application/json" \
+                  -H "Authorization: Bearer ${ZAI_TOKEN}" \
+                  -d "$(jq -n --arg c "${ZAI_CHAT_ID}" --arg d "${dep_id}" '{chatId:$c, deploymentId:$d}')" 2>/dev/null || echo 000)
+                dbody=$(head -c 300 /tmp/phoenix_deploy.json 2>/dev/null || true)
+                log "deploy http=${dcode} body=${dbody}"
+                if [ "${dcode}" = "200" ] && echo "${dbody}" | grep -q 'success'; then
+                  WAKE_METHOD="zai-deploy"
+                  return 0
+                fi
+                if [ "${dcode}" = "401" ]; then return 3; fi
+              fi
               if [ -z "${ZAI_TOKEN}" ] || [ -z "${ZAI_CHAT_ID}" ]; then
                 log "wake skipped: ZAI_TOKEN/ZAI_CHAT_ID not configured"
                 return 2   # تنظیم نشده
               fi
-              local code body
-              code=$(curl -sS -m 30 -o /tmp/phoenix_wake.json -w '%{http_code}' \
-                -X POST "${WAKE_URL}" \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer ${ZAI_TOKEN}" \
-                -d "$(jq -n --arg c "${ZAI_CHAT_ID}" '{chatId:$c}')" 2>/dev/null || echo 000)
-              body=$(head -c 300 /tmp/phoenix_wake.json 2>/dev/null || true)
-              log "wake http=${code} body=${body}"
-              if [ "${code}" = "200" ]; then WAKE_METHOD="zai-restart"; return 0; fi
-              if [ "${code}" = "401" ]; then return 3; fi   # توکن منقضی
               return 1
             }
             
@@ -258,6 +289,7 @@ jobs:
               if [ "${wake_rc}" = "0" ]; then
                 wait_sec="${WAKE_WAIT_SEC}"
                 [ "${WAKE_METHOD}" = "ping-burst" ] && wait_sec="${BURST_CONFIRM_SEC}"
+                [ "${WAKE_METHOD}" = "zai-deploy" ] && wait_sec="${DEPLOY_WAIT_SEC}"
                 log "wake ok (${WAKE_METHOD}) — waiting ${wait_sec}s for engine boot..."
                 sleep "${wait_sec}"
                 if check_health; then
@@ -265,6 +297,8 @@ jobs:
                   log "AUTO-RECOVERED (${WAKE_METHOD})"
                   if [ "${WAKE_METHOD}" = "ping-burst" ]; then
                     recover_how="• سرورِ خفته با پینگ‌های پیاپی نگهبان بیدار شد ✅"
+                  elif [ "${WAKE_METHOD}" = "zai-deploy" ]; then
+                    recover_how="• قطعی تشخیص داده شد → استقرار مجدد خودکار (deploy API) صدا زده شد → پلتفرم از نو مستقر و بیدار شد ✅"
                   else
                     recover_how="• قطعی تشخیص داده شد → API ری‌استارت z.ai صدا زده شد → پلتفرم بیدار شد ✅"
                   fi
