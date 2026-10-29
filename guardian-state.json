@@ -1,15 +1,10 @@
 {
-  "state": "down",
-  "since": "2026-10-29T14:00:20Z",
-  "lastCheck": "2026-10-29T14:10:20Z",
-  "lastAlertAt": "2026-10-29T14:00:20Z",
+  "state": "up",
+  "since": "2026-10-29T14:15:20Z",
+  "lastCheck": "2026-10-29T14:15:20Z",
+  "lastAlertAt": null,
   "lastWake401AlertAt": null,
   "events": [
-    {
-      "type": "recovered",
-      "at": "2026-10-13T01:40:20Z",
-      "downMin": 385
-    },
     {
       "type": "down_started",
       "at": "2026-10-13T03:50:20Z"
@@ -139,6 +134,11 @@
     {
       "type": "down_started",
       "at": "2026-10-29T14:00:20Z"
+    },
+    {
+      "type": "auto_recovered",
+      "at": "2026-10-29T14:15:20Z",
+      "downMin": 15
     }
   ]
 }
