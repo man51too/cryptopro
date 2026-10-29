@@ -1,0 +1,143 @@
+# ============================================================
+# Botkeep Guardian v1.0 — نگهبان پلتفرم CryptoPro روی Botkeep
+# لایهٔ پنجم همیشه‌آنلاین بودن:
+#   ۱) کانتینر Botkeep همیشه‌روشن است (بدون خواب)
+#   ۲) کرش فرایند → ری‌استارت خودکار Pterodactyl
+#   ۳) boot.sh خودترمیم‌کننده → بازسازی runtime از آرشیو
+#   ۴) موتور تحلیل → خودترمیمی داخلی (instrumentation)
+#   ۵) این نگهبان → هر ۵ دقیقه وضعیت را از API رسمی Botkeep
+#      چک می‌کند؛ اگر سرور متوقف بود روشنش می‌کند؛ اگر HTTP
+#      جواب نداد ری‌استارت می‌زند؛ هر رویداد را به تلگرام
+#      گزارش می‌دهد (با ضد-اسپم state-file).
+#
+# Secretهای لازم (همه تنظیم شده‌اند):
+#   BOTKEEP_API_KEY     کلید Developer API پنل Botkeep
+#   BOTKEEP_WORKLOAD_ID شناسه سرور CryptoPro در پنل
+#   BOTKEEP_URL         آدرس عمومی پلتفرم
+#   TG_BOT_TOKEN        توکن ربات تلگرام (مشترک با فونیکس)
+#   TG_CHAT_ID          شناسه چت تلگرام
+# ============================================================
+name: Botkeep Guardian
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: botkeep-guardian
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Botkeep guard cycle
+        env:
+          BK_KEY: ${{ secrets.BOTKEEP_API_KEY }}
+          BK_WID: ${{ secrets.BOTKEEP_WORKLOAD_ID }}
+          BK_URL: ${{ secrets.BOTKEEP_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set -uo pipefail
+          API="https://api.botkeep.cloud/api/v1/developer"
+          now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          log() { echo "[bk-guard $(now_iso)] $*"; }
+          tg() {
+            [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ] && return 0
+            curl -sS -m 20 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg c "${TG_CHAT_ID}" --arg t "$1" '{chat_id:$c,text:$t,parse_mode:"HTML"}')" \
+              >/dev/null 2>&1 || true
+          }
+          hdr() { echo -H "Authorization: Bearer ${BK_KEY}" -H "Accept: application/json" -H "Origin: https://botkeep.cloud"; }
+
+          STATE_FILE="botkeep-state.json"
+          [ -f "${STATE_FILE}" ] || echo '{"alert":"ok"}' > "${STATE_FILE}"
+          prev_alert=$(jq -r '.alert // "ok"' "${STATE_FILE}")
+
+          # ---------- ۱) وضعیت رسمی سرور از API پنل ----------
+          status=$(curl -sS -m 30 $(hdr) "${API}/workloads/${BK_WID}" | jq -r '.status // "unknown"')
+          log "workload status: ${status}"
+          acted=0
+
+          if [ "${status}" != "running" ]; then
+            # سرور متوقف است → روشن کن (boot خودترمیم‌کننده، ~۶۰-۹۰ ثانیه)
+            log "server not running — issuing start..."
+            curl -sS -m 30 -X POST $(hdr) -H "Content-Type: application/json" \
+              -d '{"action":"start"}' "${API}/workloads/${BK_WID}/actions" >/dev/null 2>&1 || true
+            ok=0
+            for i in 1 2 3 4 5 6; do
+              sleep 25
+              st2=$(curl -sS -m 30 $(hdr) "${API}/workloads/${BK_WID}" | jq -r '.status // "unknown"')
+              log "boot poll ${i}: ${st2}"
+              [ "${st2}" = "running" ] && { ok=1; break; }
+            done
+            if [ "${ok}" = "1" ]; then
+              tg "🌅 <b>نگهبان Botkeep — احیای خودکار</b>
+
+✅ پلتفرم CryptoPro متوقف شده بود؛ نگهبان آن را دوباره روشن کرد و سرور بالا آمد.
+🕐 $(now_iso)"
+              acted=1
+            else
+              tg "🚨 <b>نگهبان Botkeep — خطا</b>
+
+⚠️ روشن‌سازی پلتفرم CryptoPro ناموفق بود (آخرین وضعیت: ${st2}).
+👈 بررسی دستی: https://botkeep.cloud/app
+🕐 $(now_iso)"
+              echo '{"alert":"failed"}' > "${STATE_FILE}"
+              acted=1
+            fi
+          else
+            # ---------- ۲) سرور روشن است → سلامت HTTP ----------
+            code1=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -A "botkeep-guardian/1.0" \
+              "${BK_URL%/}/api/cron?src=bkguard" 2>/dev/null || echo 000)
+            log "http ping #1: ${code1}"
+            if [ "${code1}" != "200" ]; then
+              sleep 20
+              code2=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -A "botkeep-guardian/1.0" \
+                "${BK_URL%/}/api/cron?src=bkguard" 2>/dev/null || echo 000)
+              log "http ping #2: ${code2}"
+              if [ "${code2}" != "200" ]; then
+                log "HTTP unhealthy twice — restarting workload..."
+                curl -sS -m 30 -X POST $(hdr) -H "Content-Type: application/json" \
+                  -d '{"action":"restart"}' "${API}/workloads/${BK_WID}/actions" >/dev/null 2>&1 || true
+                tg "🔄 <b>نگهبان Botkeep</b>
+
+سرور در حال اجرا بود اما پاسخ HTTP نمی‌داد (${code1}/${code2}) — ری‌استارت خودکار انجام شد.
+🕐 $(now_iso)"
+                acted=1
+              fi
+            fi
+          fi
+
+          # ---------- ۳) به‌روزرسانی state (ضد-اسپام) ----------
+          cur="ok"
+          [ -f "${STATE_FILE}" ] && cur=$(jq -r '.alert // "ok"' "${STATE_FILE}")
+          if [ "${cur}" = "failed" ] && [ "${status}" = "running" ] && [ "${acted}" = "0" ]; then
+            tg "✅ <b>نگهبان Botkeep</b>
+
+پلتفرم CryptoPro دوباره سالم و آنلاین است.
+🕐 $(now_iso)"
+            echo '{"alert":"ok"}' > "${STATE_FILE}"
+          elif [ "${acted}" = "0" ]; then
+            log "all healthy — no action needed"
+          fi
+
+          # commit state اگر تغییر کرده
+          if ! diff <(echo '{"alert":"ok"}') "${STATE_FILE}" >/dev/null 2>&1 || ! git diff --quiet "${STATE_FILE}" 2>/dev/null; then
+            git config user.name  "botkeep-guardian[bot]"
+            git config user.email "botkeep-guardian[bot]@users.noreply.github.com"
+            git add "${STATE_FILE}"
+            git commit -m "bk-guard: state @ $(now_iso)" >/dev/null 2>&1 || true
+            git push >/dev/null 2>&1 || log "state push failed (non-fatal)"
+          fi
+          log "cycle done"
