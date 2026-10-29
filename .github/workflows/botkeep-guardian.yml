@@ -58,26 +58,26 @@ jobs:
               -d "$(jq -n --arg c "${TG_CHAT_ID}" --arg t "$1" '{chat_id:$c,text:$t,parse_mode:"HTML"}')" \
               >/dev/null 2>&1 || true
           }
-          hdr() { echo -H "Authorization: Bearer ${BK_KEY}" -H "Accept: application/json" -H "Origin: https://botkeep.cloud"; }
+          HDR=(-H "Authorization: Bearer ${BK_KEY}" -H "Accept: application/json" -H "Origin: https://botkeep.cloud" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 
           STATE_FILE="botkeep-state.json"
           [ -f "${STATE_FILE}" ] || echo '{"alert":"ok"}' > "${STATE_FILE}"
           prev_alert=$(jq -r '.alert // "ok"' "${STATE_FILE}")
 
           # ---------- ۱) وضعیت رسمی سرور از API پنل ----------
-          status=$(curl -sS -m 30 $(hdr) "${API}/workloads/${BK_WID}" | jq -r '.status // "unknown"')
+          status=$(curl -sS -m 30 "${HDR[@]}" "${API}/workloads/${BK_WID}" | jq -r '.status // "unknown"')
           log "workload status: ${status}"
           acted=0
 
           if [ "${status}" != "running" ]; then
             # سرور متوقف است → روشن کن (boot خودترمیم‌کننده، ~۶۰-۹۰ ثانیه)
             log "server not running — issuing start..."
-            curl -sS -m 30 -X POST $(hdr) -H "Content-Type: application/json" \
+            curl -sS -m 30 -X POST "${HDR[@]}" -H "Content-Type: application/json" \
               -d '{"action":"start"}' "${API}/workloads/${BK_WID}/actions" >/dev/null 2>&1 || true
             ok=0
             for i in 1 2 3 4 5 6; do
               sleep 25
-              st2=$(curl -sS -m 30 $(hdr) "${API}/workloads/${BK_WID}" | jq -r '.status // "unknown"')
+              st2=$(curl -sS -m 30 "${HDR[@]}" "${API}/workloads/${BK_WID}" | jq -r '.status // "unknown"')
               log "boot poll ${i}: ${st2}"
               [ "${st2}" = "running" ] && { ok=1; break; }
             done
@@ -101,7 +101,7 @@ jobs:
               log "http ping #2: ${code2}"
               if [ "${code2}" != "200" ]; then
                 log "HTTP unhealthy twice — restarting workload..."
-                curl -sS -m 30 -X POST $(hdr) -H "Content-Type: application/json" \
+                curl -sS -m 30 -X POST "${HDR[@]}" -H "Content-Type: application/json" \
                   -d '{"action":"restart"}' "${API}/workloads/${BK_WID}/actions" >/dev/null 2>&1 || true
                 tg "🔄 <b>نگهبان Botkeep</b> — سرور در حال اجرا بود اما پاسخ HTTP نمی‌داد (${code1}/${code2}) — ری‌استارت خودکار انجام شد. 🕐 $(now_iso)"
                 acted=1
