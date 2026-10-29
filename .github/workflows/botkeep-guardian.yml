@@ -82,17 +82,10 @@ jobs:
               [ "${st2}" = "running" ] && { ok=1; break; }
             done
             if [ "${ok}" = "1" ]; then
-              tg "🌅 <b>نگهبان Botkeep — احیای خودکار</b>
-
-✅ پلتفرم CryptoPro متوقف شده بود؛ نگهبان آن را دوباره روشن کرد و سرور بالا آمد.
-🕐 $(now_iso)"
+              tg "🌅 <b>نگهبان Botkeep — احیای خودکار</b> — ✅ پلتفرم CryptoPro متوقف شده بود؛ نگهبان آن را دوباره روشن کرد و سرور بالا آمد. 🕐 $(now_iso)"
               acted=1
             else
-              tg "🚨 <b>نگهبان Botkeep — خطا</b>
-
-⚠️ روشن‌سازی پلتفرم CryptoPro ناموفق بود (آخرین وضعیت: ${st2}).
-👈 بررسی دستی: https://botkeep.cloud/app
-🕐 $(now_iso)"
+              tg "🚨 <b>نگهبان Botkeep — خطا</b> — ⚠️ روشن‌سازی پلتفرم CryptoPro ناموفق بود (آخرین وضعیت: ${st2}). 👈 بررسی دستی: https://botkeep.cloud/app 🕐 $(now_iso)"
               echo '{"alert":"failed"}' > "${STATE_FILE}"
               acted=1
             fi
@@ -110,10 +103,7 @@ jobs:
                 log "HTTP unhealthy twice — restarting workload..."
                 curl -sS -m 30 -X POST $(hdr) -H "Content-Type: application/json" \
                   -d '{"action":"restart"}' "${API}/workloads/${BK_WID}/actions" >/dev/null 2>&1 || true
-                tg "🔄 <b>نگهبان Botkeep</b>
-
-سرور در حال اجرا بود اما پاسخ HTTP نمی‌داد (${code1}/${code2}) — ری‌استارت خودکار انجام شد.
-🕐 $(now_iso)"
+                tg "🔄 <b>نگهبان Botkeep</b> — سرور در حال اجرا بود اما پاسخ HTTP نمی‌داد (${code1}/${code2}) — ری‌استارت خودکار انجام شد. 🕐 $(now_iso)"
                 acted=1
               fi
             fi
@@ -123,10 +113,7 @@ jobs:
           cur="ok"
           [ -f "${STATE_FILE}" ] && cur=$(jq -r '.alert // "ok"' "${STATE_FILE}")
           if [ "${cur}" = "failed" ] && [ "${status}" = "running" ] && [ "${acted}" = "0" ]; then
-            tg "✅ <b>نگهبان Botkeep</b>
-
-پلتفرم CryptoPro دوباره سالم و آنلاین است.
-🕐 $(now_iso)"
+            tg "✅ <b>نگهبان Botkeep</b> — پلتفرم CryptoPro دوباره سالم و آنلاین است. 🕐 $(now_iso)"
             echo '{"alert":"ok"}' > "${STATE_FILE}"
           elif [ "${acted}" = "0" ]; then
             log "all healthy — no action needed"
