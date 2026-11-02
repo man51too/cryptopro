@@ -1,19 +1,10 @@
 {
   "state": "up",
-  "since": "2026-11-01T22:10:20Z",
-  "lastCheck": "2026-11-01T23:55:20Z",
+  "since": "2026-11-02T00:00:21Z",
+  "lastCheck": "2026-11-02T00:00:21Z",
   "lastAlertAt": null,
   "lastWake401AlertAt": null,
   "events": [
-    {
-      "type": "down_started",
-      "at": "2026-10-31T14:05:20Z"
-    },
-    {
-      "type": "auto_recovered",
-      "at": "2026-10-31T14:05:20Z",
-      "downMin": 155
-    },
     {
       "type": "down_started",
       "at": "2026-10-31T16:40:20Z"
@@ -139,6 +130,15 @@
       "type": "auto_recovered",
       "at": "2026-11-01T22:10:20Z",
       "downMin": 155
+    },
+    {
+      "type": "down_started",
+      "at": "2026-11-02T00:00:21Z"
+    },
+    {
+      "type": "auto_recovered",
+      "at": "2026-11-02T00:00:21Z",
+      "downMin": 110
     }
   ]
 }
