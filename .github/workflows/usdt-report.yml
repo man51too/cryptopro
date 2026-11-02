@@ -24,10 +24,9 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Fetch Bybit balance & send Telegram report
+      - name: Fetch AXIOM engine stats & send Telegram report
         env:
-          BYBIT_KEY: ${{ secrets.BYBIT_DEMO_KEY }}
-          BYBIT_SECRET: ${{ secrets.BYBIT_DEMO_SECRET }}
+          AXIOM_ACCESS_KEY: ${{ secrets.AXIOM_ACCESS_KEY }}
           TG_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT_ID }}
         run: python usdt-report/report.py

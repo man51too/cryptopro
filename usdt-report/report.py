@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""report.py — گزارش دوره‌ای تتر و بازدهی (اجرای مخصوص GitHub Actions).
+"""report.py — گزارش دوره‌ای تتر و بازدهی (GitHub Actions).
 
-- منبع داده: Bybit Demo API (مستقیم از رانر GitHub — IP آزاد)
-- خروجی: پیام فارسی حرفه‌ای → تلگرام
-- تاریخچه: usdt-report/history.json (برای مقایسه با گزارش قبلی)
-
-Config از env: BYBIT_KEY, BYBIT_SECRET, TG_TOKEN, TG_CHAT
+منبع: موتور AXIOM Delta روی botkeep (REST /metrics + /export/trades) — بدون محدودیت جغرافیایی Bybit.
+Config از env: AXIOM_ACCESS_KEY, TG_TOKEN, TG_CHAT
+Dedup: اگر آخرین گزارش کمتر از ۴.۵ ساعت قبل ثبت شده باشد، ارسال نمی‌کند (SKIP_RECENT).
 """
-import hashlib
-import hmac
+import csv
+import io
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-API_KEY = os.environ.get("BYBIT_KEY", "")
-API_SECRET = os.environ.get("BYBIT_SECRET", "")
-TG_TOKEN = os.environ.get("TG_TOKEN", "")
-TG_CHAT = os.environ.get("TG_CHAT", "")
-BYBIT_BASE = "https://api-demo.bybit.com"
+ENGINE_BASE = "https://cryptopro.bot-keep.xyz"
 HERE = os.path.dirname(os.path.abspath(__file__))
 HIST_PATH = os.path.join(HERE, "history.json")
 TZ = timezone(timedelta(hours=3, minutes=30))  # Asia/Tehran (بدون DST)
@@ -77,124 +71,53 @@ def g2j(gy, gm, gd):
     return jy, jm, jd
 
 
-def http_json(url, data=None, headers=None, timeout=25, tries=3):
+def fetch_text(url, timeout=60, tries=2):
     last = ""
     for i in range(tries):
         try:
-            req = urllib.request.Request(url, data=data, headers=headers or {})
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode())
+                return r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace")
-            try:
-                return json.loads(body)
-            except Exception:
-                last = f"HTTP {e.code}: {body[:160]}"
+            body = e.read().decode("utf-8", "replace")[:200]
+            last = f"HTTP {e.code}: {body}"
+            if e.code == 401:
+                break
         except Exception as e:
             last = str(e)
-        time.sleep(4 * (i + 1))
-    raise RuntimeError(f"request failed ({url[:70]}): {last}")
+        time.sleep(5 * (i + 1))
+    raise RuntimeError(f"fetch failed ({url.split('?')[0]}): {last}")
 
 
-def bybit_get(path, params=None):
-    qs = urllib.parse.urlencode(params or {})
-    for attempt in range(2):
-        ts = str(int(time.time() * 1000))
-        if attempt == 1:
-            try:
-                t = http_json(BYBIT_BASE + "/v5/market/time", timeout=10, tries=2)
-                ts = str(int(t["result"]["timeSecond"]) * 1000)
-            except Exception:
-                pass
-        recv = "5000"
-        sign = hmac.new(API_SECRET.encode(), (ts + API_KEY + recv + qs).encode(),
-                        hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": API_KEY,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": recv,
-            "X-BAPI-SIGN": sign,
-        }
-        d = http_json(BYBIT_BASE + path + ("?" + qs if qs else ""), headers=headers, tries=2)
-        if d.get("retCode") == 0:
-            return d.get("result") or {}
-        if d.get("retCode") in (10001, 10002):
+def parse_metrics(text):
+    out = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
             continue
-        raise RuntimeError(f"Bybit {path}: retCode={d.get('retCode')} {d.get('retMsg')}")
-    raise RuntimeError(f"Bybit {path}: time sync failed")
+        m = re.match(r"^([a-z_]+)(\{[^}]*\})?\s+([-0-9.eE+]+)\s*$", line.strip())
+        if m:
+            out[m.group(1)] = float(m.group(3))
+    return out
 
 
-def get_wallet():
-    last_err = None
-    for acct_type in ("UNIFIED", "CONTRACT"):
-        try:
-            res = bybit_get("/v5/account/wallet-balance", {"accountType": acct_type})
-        except RuntimeError as e:
-            last_err = e
-            continue
-        rows = res.get("list") or []
-        if not rows:
-            continue
-        acct = rows[0]
-        usdt = next((c for c in (acct.get("coin") or []) if c.get("coin") == "USDT"), {})
-        if not usdt and not acct.get("totalEquity"):
-            continue
-        free = fnum(usdt.get("availableToWithdraw"))
-        if free is None:
-            free = fnum(usdt.get("availableBalance"))
-        if free is None:
-            free = fnum(acct.get("totalAvailableBalance"))
-        if free is None:
-            free = fnum(usdt.get("walletBalance"), 0.0)
-        equity = fnum(usdt.get("equity"))
-        if equity is None:
-            equity = fnum(acct.get("totalEquity"), 0.0)
-        return {
-            "equity": equity,
-            "free": free,
-            "margin": fnum(usdt.get("totalPositionIM"), 0.0) + fnum(usdt.get("totalOrderIM"), 0.0),
-            "upnl": fnum(usdt.get("unrealisedPnl"), 0.0),
-            "cum": fnum(usdt.get("cumRealisedPnl"), 0.0),
-        }
-    raise RuntimeError(f"wallet-balance failed: {last_err}")
-
-
-def get_positions():
-    res = bybit_get("/v5/position/list", {"category": "linear", "settleCoin": "USDT"})
+def parse_trades(csv_text):
     out = []
-    for p in res.get("list") or []:
-        if abs(fnum(p.get("size"), 0.0)) < 1e-12:
+    rdr = csv.DictReader(io.StringIO(csv_text))
+    for row in rdr:
+        et = (row.get("exitTime") or "").strip()
+        if not et:
             continue
-        out.append({
-            "symbol": p.get("symbol", "?"),
-            "side": p.get("side", "?"),
-            "upnl": fnum(p.get("unrealisedPnl"), 0.0),
-        })
-    out.sort(key=lambda x: abs(x["upnl"]), reverse=True)
+        try:
+            t = datetime.fromisoformat(et.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        out.append((t, fnum(row.get("pnl"), 0.0) or 0.0))
     return out
 
 
-def fetch_closed(now_ms):
-    start = now_ms - 31 * 86400 * 1000
-    out, cursor, pages = [], "", 0
-    while pages < 12:
-        params = {"category": "linear", "startTime": start, "endTime": now_ms, "limit": 200}
-        if cursor:
-            params["cursor"] = cursor
-        res = bybit_get("/v5/position/closed-pnl", params)
-        lst = res.get("list") or []
-        out.extend(lst)
-        cursor = res.get("nextPageCursor") or ""
-        pages += 1
-        if not cursor or not lst:
-            break
-    return out
-
-
-def win_stats(recs, now_s, win_s):
+def win_stats(trades, now_s, win_s):
     cut = now_s - win_s
-    pnls = [fnum(r.get("closedPnl"), 0.0) for r in recs
-            if fnum(r.get("createdTime"), 0.0) / 1000.0 >= cut]
+    pnls = [p for t, p in trades if t >= cut]
     n = len(pnls)
     total = sum(pnls)
     wins = sum(1 for p in pnls if p > 0)
@@ -202,45 +125,64 @@ def win_stats(recs, now_s, win_s):
     return total, n, wr
 
 
-def update_history(equity, now_s):
-    hist = []
+def load_last_ts():
+    try:
+        with open(HIST_PATH, "r", encoding="utf-8") as f:
+            h = json.load(f)
+        return h[-1].get("t", 0) if h else 0
+    except Exception:
+        return 0
+
+
+def save_history(equity, now_s):
+    h = []
     if os.path.exists(HIST_PATH):
         try:
             with open(HIST_PATH, "r", encoding="utf-8") as f:
-                hist = json.load(f)
+                h = json.load(f)
         except Exception:
-            hist = []
-    prev = hist[-1] if hist else None
-    hist.append({"t": now_s, "eq": round(equity, 4)})
-    try:
-        hist = hist[-400:]
-        tmp = HIST_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(hist, f, ensure_ascii=False)
-        os.replace(tmp, HIST_PATH)
-    except Exception:
-        pass
-    return prev
+            h = []
+    h.append({"t": now_s, "eq": round(equity, 4)})
+    tmp = HIST_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(h[-400:], f, ensure_ascii=False)
+    os.replace(tmp, HIST_PATH)
 
 
-def build_text(w, positions, recs, now_s, prev):
+def build_text(m, trades, now_s, prev_eq, prev_ts):
     dt = datetime.now(TZ)
     jy, jm, jd = g2j(dt.year, dt.month, dt.day)
-    eq = w["equity"]
+    eq = m.get("axiom_equity_usdt", 0.0)
+    total_pnl = m.get("axiom_total_pnl_usdt", 0.0)
+    upnl = m.get("axiom_unrealized_pnl_usdt", 0.0)
+    day_pnl = m.get("axiom_day_pnl_usdt", 0.0)
+    dd_max = m.get("axiom_drawdown_max", 0.0)
+    open_pos = int(m.get("axiom_open_positions", 0))
+    n_closed = int(m.get("axiom_trades_closed_total", 0))
+    wr_all = m.get("axiom_win_rate", 0.0) * 100.0
+    pf = m.get("axiom_profit_factor", 0.0)
+    gross = m.get("axiom_gross_exposure", 0.0)
+
     L = []
     L.append("📊 <b>گزارش دوره‌ای کریپتوپرو — تتر و بازدهی</b>")
     L.append(f"🗓 {fa(jy)}/{fa(f'{jm:02d}')}/{fa(f'{jd:02d}')} • 🕐 {fa(dt.strftime('%H:%M'))} (تهران)")
     L.append("")
-    L.append("💠 <b>موجودی (Bybit — حساب دمو)</b>")
+    L.append("💰 <b>موجودی (Bybit دمو — موتور AXIOM)</b>")
     L.append(f"• ارزش کل حساب: <b>{amt(eq)} USDT</b>")
-    L.append(f"• موجودی آزاد: {amt(w['free'])} USDT")
-    L.append(f"• مارجین درگیر: {amt(w['margin'])} USDT")
-    L.append(f"• سود/زیان شناور: {money(w['upnl'])} USDT")
-    L.append(f"• سود تجمعی کل: {money(w['cum'])} USDT")
+    start_eq = eq - total_pnl
+    line = f"• سود کل از شروع: {money(total_pnl)} USDT"
+    if start_eq > 1:
+        line += f" ({pct(total_pnl / start_eq * 100)})"
+    L.append(line)
+    L.append(f"• سود امروز: {money(day_pnl)} USDT")
+    L.append(f"• سود/زیان شناور: {money(upnl)} USDT")
+    if gross > 0:
+        L.append(f"• حجم درگیر: {amt(gross)} USDT | پوزیشن باز: {fa(open_pos)}")
+    L.append(f"• حداکثر افت سرمایه: {fa(round(dd_max * 100, 2))}٪")
     L.append("")
     L.append("📈 <b>بازدهی دوره‌ای</b> (سود محقق‌شدهٔ معاملات)")
     for label, win in WINDOWS:
-        pnl, n, wr = win_stats(recs, now_s, win)
+        pnl, n, wr = win_stats(trades, now_s, win)
         base = eq - pnl
         line = f"• {label}: {money(pnl)} USDT"
         if base > 1:
@@ -251,38 +193,34 @@ def build_text(w, positions, recs, now_s, prev):
             line += " | بدون معامله"
         L.append(line)
     L.append("")
-    if positions:
-        L.append(f"📍 <b>پوزیشن‌های باز</b> ({fa(len(positions))}):")
-        for p in positions[:8]:
-            arrow = "🔼" if p["side"] == "Buy" else "🔽"
-            side_fa = "خرید" if p["side"] == "Buy" else "فروش"
-            L.append(f"• {p['symbol']} {arrow} {side_fa} | {money(p['upnl'])} USDT")
-        if len(positions) > 8:
-            L.append(f"• و {fa(len(positions) - 8)} پوزیشن دیگر…")
-    else:
-        L.append("📍 پوزیشن بازی وجود ندارد")
-    L.append("")
-    if prev and now_s - prev.get("t", 0) > 300:
-        pe = fnum(prev.get("eq"), 0.0)
-        d = eq - pe
+    L.append("🎯 <b>عملکرد کلی موتور</b>")
+    L.append(f"• معاملات بسته‌شده: {fa(n_closed)} | وین‌ریت: {fa(round(wr_all, 1))}٪")
+    L.append(f"• پروفیت فکتور: {fa(round(pf, 2))}")
+    if prev_eq and now_s - prev_ts > 300:
+        d = eq - prev_eq
         line = f"🔄 نسبت به گزارش قبلی: {money(d)} USDT"
-        if pe > 1:
-            line += f" ({pct(d / pe * 100)})"
+        if prev_eq > 1:
+            line += f" ({pct(d / prev_eq * 100)})"
         L.append(line)
+    L.append("")
     L.append("🤖 CryptoPro • ارسال خودکار هر ۵ ساعت")
     return "\n".join(L)
 
 
 def send_tg(text):
+    import urllib.parse
     data = urllib.parse.urlencode({
-        "chat_id": TG_CHAT, "text": text,
-        "parse_mode": "HTML", "disable_web_page_preview": "true",
+        "chat_id": os.environ.get("TG_CHAT", ""),
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
     }).encode()
     last = ""
     for _ in range(3):
         try:
             req = urllib.request.Request(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data)
+                f"https://api.telegram.org/bot{os.environ.get('TG_TOKEN', '')}/sendMessage",
+                data=data)
             with urllib.request.urlopen(req, timeout=25) as r:
                 out = json.loads(r.read().decode())
             if out.get("ok"):
@@ -299,17 +237,35 @@ def send_tg(text):
 
 
 def main():
-    missing = [k for k, v in (("BYBIT_KEY", API_KEY), ("BYBIT_SECRET", API_SECRET),
-                              ("TG_TOKEN", TG_TOKEN), ("TG_CHAT", TG_CHAT)) if not v]
-    if missing:
-        raise RuntimeError(f"missing env: {','.join(missing)}")
-    now_ms = int(time.time() * 1000)
-    now_s = now_ms // 1000
-    w = get_wallet()
-    positions = get_positions()
-    recs = fetch_closed(now_ms)
-    prev = update_history(w["equity"], now_s)
-    text = build_text(w, positions, recs, now_s, prev)
+    key = (os.environ.get("AXIOM_ACCESS_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("missing env AXIOM_ACCESS_KEY")
+    if not os.environ.get("TG_TOKEN") or not os.environ.get("TG_CHAT"):
+        raise RuntimeError("missing env TG_TOKEN/TG_CHAT")
+
+    # Dedup: اگر گزارش جدیدی طی ۴.۵ ساعت گذشته ثبت شده، ارسال نکن
+    last_ts = load_last_ts()
+    if time.time() - last_ts < 4.5 * 3600:
+        print("SKIP_RECENT")
+        return 0
+
+    now_s = int(time.time())
+    m = parse_metrics(fetch_text(f"{ENGINE_BASE}/metrics?key={key}", timeout=30))
+    if "axiom_equity_usdt" not in m:
+        raise RuntimeError("metrics ok but no equity field")
+    csv_text = fetch_text(f"{ENGINE_BASE}/export/trades?key={key}", timeout=90)
+    trades = parse_trades(csv_text)
+
+    prev_eq = 0.0
+    try:
+        with open(HIST_PATH, "r", encoding="utf-8") as f:
+            h = json.load(f)
+        prev_eq = fnum(h[-1].get("eq"), 0.0) if h else 0.0
+    except Exception:
+        pass
+
+    text = build_text(m, trades, now_s, prev_eq, last_ts)
+    save_history(m["axiom_equity_usdt"], now_s)
     send_tg(text)
     print("TELEGRAM_OK")
     return 0
